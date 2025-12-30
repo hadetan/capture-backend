@@ -308,24 +308,29 @@ const refreshSession = async ({ refreshToken }) => {
     };
 };
 
-const logout = async ({ authUser, accessToken, refreshToken }) => {
-    if (!authUser?.id) {
+const logout = async (context = {}) => {
+    const { id, accessToken, refreshToken } = context || {};
+    const supabaseUserId = typeof id === 'string' ? id.trim() : '';
+
+    if (!supabaseUserId) {
         throw new ApiError(httpStatus.UNAUTHORIZED, 'User context missing');
     }
 
-    const token = [accessToken, refreshToken]
-        .map((value) => (typeof value === 'string' ? value.trim() : ''))
-        .find((value) => Boolean(value));
-
-    if (!token) {
-        throw new ApiError(httpStatus.UNAUTHORIZED, 'Session token missing');
-    }
-
     const client = getSupabaseClient();
-    const { error } = await client.auth.admin.signOut(token);
+    const { error } = await client.auth.admin.signOut(supabaseUserId);
 
     if (error) {
         throw toApiError(error, httpStatus.BAD_REQUEST);
+    }
+
+    const hasToken = [accessToken, refreshToken].some((value) => typeof value === 'string' && value.trim().length);
+
+    if (hasToken && client?.auth?.signOut) {
+        try {
+            await client.auth.signOut();
+        } catch (signOutError) {
+            // Swallow client-side sign out errors; admin signOut already succeeded.
+        }
     }
 };
 

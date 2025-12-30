@@ -77,7 +77,7 @@ const logout = catchAsync(async (req, res) => {
     const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
 
     await authService.logout({
-        authUser: req.authUser,
+        id: req.authUser?.id,
         accessToken: req.accessToken,
         refreshToken,
     });

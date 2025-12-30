@@ -8,13 +8,25 @@ const googleSessionSchema = Joi.object({
     tokenType: Joi.string().trim().default('bearer'),
 }).required();
 
+const REFRESH_COOKIE_NAME = 'sb-refresh-token';
+
 const refreshSessionSchema = Joi.object({
     refreshToken: Joi.string().trim().required(),
 }).unknown(false);
 
 const validateRefreshSession = (req, _res, next) => {
     try {
-        req.body = validateSchema(refreshSessionSchema, req.body || {});
+        const body = req.body || {};
+        const hasBodyToken = typeof body.refreshToken === 'string' && body.refreshToken.trim().length > 0;
+        const hasCookieToken = typeof req.cookies?.[REFRESH_COOKIE_NAME] === 'string';
+
+        if (!hasBodyToken && hasCookieToken) {
+            req.body = {};
+
+            return next();
+        }
+
+        req.body = validateSchema(refreshSessionSchema, body);
         next();
     } catch (error) {
         next(error);
@@ -44,5 +56,5 @@ const validateEmptyBody = (req, _res, next) => {
 module.exports = {
     validateGoogleSession,
     validateEmptyBody,
-    validateRefreshSession
+    validateRefreshSession,
 };
