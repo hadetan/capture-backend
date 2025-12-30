@@ -61,4 +61,11 @@ const httpStatus = {
     NETWORK_AUTHENTICATION_REQUIRED: 511,
 };
 
-module.exports = { httpStatus };
+const ACCESS_COOKIE_NAME = 'sb-access-token';
+const REFRESH_COOKIE_NAME = 'sb-refresh-token';
+
+module.exports = {
+    httpStatus,
+    ACCESS_COOKIE_NAME,
+    REFRESH_COOKIE_NAME,
+};

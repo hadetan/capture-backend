@@ -1,6 +1,6 @@
 const Joi = require('joi');
 const { validateSchema } = require('../utils/custom.validation');
-
+const { REFRESH_COOKIE_NAME } = require('../utils/const');
 const googleSessionSchema = Joi.object({
     accessToken: Joi.string().trim().required(),
     refreshToken: Joi.string().trim().required(),
@@ -8,11 +8,11 @@ const googleSessionSchema = Joi.object({
     tokenType: Joi.string().trim().default('bearer'),
 }).required();
 
-const REFRESH_COOKIE_NAME = 'sb-refresh-token';
-
 const refreshSessionSchema = Joi.object({
     refreshToken: Joi.string().trim().required(),
 }).unknown(false);
+
+const emptyBodySchema = Joi.object({}).max(0);
 
 const validateRefreshSession = (req, _res, next) => {
     try {
@@ -21,6 +21,7 @@ const validateRefreshSession = (req, _res, next) => {
         const hasCookieToken = typeof req.cookies?.[REFRESH_COOKIE_NAME] === 'string';
 
         if (!hasBodyToken && hasCookieToken) {
+            validateSchema(emptyBodySchema, body);
             req.body = {};
 
             return next();
@@ -32,8 +33,6 @@ const validateRefreshSession = (req, _res, next) => {
         next(error);
     }
 };
-
-const emptyBodySchema = Joi.object({}).max(0);
 
 const validateGoogleSession = (req, _res, next) => {
     try {

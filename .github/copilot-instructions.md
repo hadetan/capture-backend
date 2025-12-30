@@ -53,6 +53,7 @@
 - Tests mirror the `src/` layout in `test/` and should focus on:
   - unit tests for services (mock Supabase client)
   - integration tests for routes (use test server instance)
+- When making any API-affecting change (routes, controllers, services, middleware, validation), always run `npm test` before considering the work complete.
 - Environment vars needed for local dev / tests:
   - `SUPABASE_URL`, `SUPABASE_KEY` (or `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` if needed)
   - `NODE_ENV`, `PORT`
@@ -66,6 +67,7 @@
 - Keep services pure and side-effect free where possible: encapsulate Supabase calls and mapping to app DTOs in services.
 - Indentation: always use four spaces per level; do not introduce tab characters.
 - Validation modules (`*validation.js`) should declare Joi schemas that cover every field defined on the corresponding database table. When the Prisma schema defines enums (or an enum exists in shared constants), import and reuse that enum instead of duplicating the raw values.
+- Every time an API is added or modified, update or create the corresponding usage documentation under `docs/usage/` so that it reflects the exact current behavior; the docs must remain factual with no stale examples.
 - Keep domain documentation up to date: add product and technical stories under `docs/` for every significant auth, trial, or subscription change.
 - Design Prisma schema changes to support trial tracking (start timestamps, elapsed usage minutes) and tiered subscriptions (plan type, status, next billing date, token allowance overrides).
 

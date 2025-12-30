@@ -1,8 +1,6 @@
 const { catchAsync, httpResponse } = require('../utils');
+const { ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME } = require('../utils/const');
 const authService = require('./auth.service');
-
-const ACCESS_COOKIE_NAME = 'sb-access-token';
-const REFRESH_COOKIE_NAME = 'sb-refresh-token';
 
 const buildCookieOptions = (maxAgeMs) => ({
     httpOnly: true,
@@ -37,6 +35,7 @@ const clearRefreshCookie = (res) => {
 };
 
 const setSessionCookies = (res, session) => {
+    // Defensive cleanup: access token cookies were used historically, so clear any leftover values.
     clearAccessCookie(res);
     setRefreshCookie(res, session?.refreshToken, session?.refreshExpiresIn);
 };

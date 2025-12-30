@@ -97,7 +97,7 @@ Content-Type: application/json
 
 **Responses**
 
-- **201 Created** (new user) or **200 OK** (existing user):
+- **201 Created** (new user, message `Registered with Google`):
 
   ```json
   {
@@ -130,6 +130,39 @@ Content-Type: application/json
   }
   ```
 
+- **200 OK** (existing user, message `Authenticated with Google`):
+
+  ```json
+  {
+    "success": true,
+    "message": "Authenticated with Google",
+    "data": {
+      "user": {
+        "id": "<uuid>",
+        "email": "user@example.com",
+        "fullName": "Test User",
+        "avatarUrl": "https://...",
+        "countryCode": "IN",
+        "trialStatus": "ACTIVE",
+        "trialEndsAt": "2025-12-31T00:00:00.000Z",
+        "trialUsageSeconds": 900,
+        "trialUsageCapSeconds": null,
+        "nextUsageResetAt": null,
+        "subscription": null,
+        "lastLoginAt": "2025-12-30T10:00:00.000Z"
+      },
+      "session": {
+        "accessToken": "<supabase-access-token>",
+        "expiresIn": 3600,
+        "refreshExpiresIn": 2592000,
+        "tokenType": "bearer"
+      },
+      "profileComplete": true,
+      "isNewUser": false
+    }
+  }
+  ```
+
 - **4xx / 5xx Errors** expose standard JSON error payloads: `{ "success": false, "message": "..." }`.
 
 **Side Effects**
@@ -140,7 +173,7 @@ Content-Type: application/json
 
 ### 4.2 POST /api/auth/google/session/refresh
 
-Request a new access token using the HttpOnly refresh cookie. Optionally supply `refreshToken` in the JSON body when cookies are unavailable (e.g., native HTTP clients), but browsers should rely on cookies only.
+Request a new access token using the HttpOnly refresh cookie. Optionally supply `refreshToken` in the JSON body when cookies are unavailable (e.g., native HTTP clients), but browsers should rely on cookies only. When relying on the cookie, send an empty body so the schema validation passes.
 
 **Request**
 
@@ -160,7 +193,20 @@ Content-Type: application/json
   "success": true,
   "message": "Session refreshed",
   "data": {
-    "user": { "id": "<uuid>" },
+    "user": {
+      "id": "<uuid>",
+      "email": "user@example.com",
+      "fullName": "Test User",
+      "avatarUrl": "https://...",
+      "countryCode": "IN",
+      "trialStatus": "ACTIVE",
+      "trialEndsAt": "2025-12-31T00:00:00.000Z",
+      "trialUsageSeconds": 1200,
+      "trialUsageCapSeconds": null,
+      "nextUsageResetAt": null,
+      "subscription": null,
+      "lastLoginAt": "2025-12-30T10:05:00.000Z"
+    },
     "session": {
       "accessToken": "<new-access-token>",
       "expiresIn": 3600,
@@ -232,7 +278,11 @@ POST /api/auth/logout
 | 400    | "Access token lifetime exceeds supported maximum"  | `expiresIn` > 18,000 seconds                           |
 | 401    | "Invalid or expired Supabase access token"         | Supabase rejects the provided access token             |
 | 401    | "Only Google sign-ins are supported"               | Supabase user provider is not `google`                 |
+| 401    | "Google identity is not linked to this user"       | Supabase user payload lacks a Google identity          |
 | 401    | "Access token missing"                             | No bearer header supplied and legacy cookie absent     |
+| 401    | "Invalid or expired refresh token"                 | Supabase rejects the provided refresh token            |
+| 401    | "Refresh token missing"                            | Neither body nor cookie contains a refresh token       |
+| 401    | "User profile not found for refresh token"         | Prisma lacks a user record matching the refresh token  |
 | 404    | "User profile not found"                           | Prisma has no entry for the Supabase user              |
 | 503    | "Google authentication is not enabled in Supabase" | Admin API returns provider disabled                    |
 
@@ -299,7 +349,3 @@ Ensure the `.env` used by Jest includes necessary Supabase settings, or mock the
 1. Set base URL: `http://localhost:3000/api` (adjust for deployed environments).
 2. For `POST /auth/google/session`, supply valid tokens from Supabase (use Supabase CLI or UI to obtain test tokens).
 3. Capture the `sb-refresh-token` cookie (HttpOnly) for browser flows or provide `refreshToken` manually when testing the refresh endpoint via API tools.
-
----
-
-By following this guide, client teams and automation agents should be able to configure Supabase, perform Google sign-ins, and interact with the Capture backend authentication APIs confidently and without ambiguity.
