@@ -1,0 +1,7 @@
+node_modules
+.env
+/supabase/.temp/
+/supabase/.branches/
+/supabase/.local/
+/supabase/.cache/
+/supabase/*.env

@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String        @id @default(uuid())
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  supabaseUserId       String        @unique
+  email                String        @unique
+  googleSub            String        @unique
+  fullName             String?
+  avatarUrl            String?
+  countryCode          String?
+  lastLoginAt          DateTime?
+  trialStartedAt       DateTime?
+  trialEndsAt          DateTime?
+  trialStatus          TrialStatus   @default(ELIGIBLE)
+  trialUsageSeconds    Int           @default(0)
+  trialUsageCapSeconds Int?
+  trialConvertedAt     DateTime?
+  stripeCustomerId     String?       @unique
+  stripeSetupIntentId  String?
+  lastStripeEventId    String?
+  nextUsageResetAt     DateTime?
+  subscription         Subscription?
+  usageSessions        UsageSession[]
+}
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  userId               String             @unique
+  plan                 SubscriptionPlan   @default(BASIC)
+  status               SubscriptionStatus @default(PENDING)
+  priceId              String?
+  productId            String?
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  canceledAt           DateTime?
+  renewedAt            DateTime?
+  tokenDurationSeconds Int                @default(3600)
+  anthropicAccess      Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  latestInvoiceId      String?
+  lastWebhookSyncAt    DateTime?
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usageSessions        UsageSession[]
+
+  @@index([status])
+  @@index([plan])
+}
+
+model UsageSession {
+  id               String         @id @default(uuid())
+  userId           String
+  subscriptionId   String?
+  tokenKind        UsageTokenKind
+  source           UsageSource    @default(TRIAL)
+  durationSeconds  Int            @default(0)
+  startedAt        DateTime       @default(now())
+  endedAt          DateTime?
+  consumedTrialCap Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  metadata         Json?
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription     Subscription?  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, source])
+  @@index([userId, tokenKind])
+  @@index([subscriptionId])
+}
+
+enum SubscriptionPlan {
+  BASIC
+  PRO
+}
+
+enum SubscriptionStatus {
+  PENDING
+  ACTIVE
+  INCOMPLETE
+  PAST_DUE
+  CANCELED
+}
+
+enum TrialStatus {
+  ELIGIBLE
+  ACTIVE
+  EXHAUSTED
+  CONVERTED
+}
+
+enum UsageSource {
+  TRIAL
+  SUBSCRIPTION
+  BONUS
+}
+
+enum UsageTokenKind {
+  ASSEMBLY_AI
+  ANTHROPIC
+}

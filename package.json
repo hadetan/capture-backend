@@ -1,0 +1,43 @@
+{
+  "name": "saubhagya-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:db-push": "prisma db push",
+    "test-supabase-connection": "node scripts/test-supabase-connection.js",
+    "lint": "eslint .",
+    "test:watch": "jest --watch",
+    "sb:init": "supabase init",
+    "sb:start": "supabase start",
+    "sb:stop": "supabase stop"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@prisma/client": "^7.2.0",
+    "@supabase/supabase-js": "^2.89.0",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.2.1",
+    "joi": "^17.11.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "eslint-plugin-jest": "^27.9.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.3",
+    "prisma": "^7.2.0",
+    "supabase": "^2.70.5",
+    "supertest": "^7.1.1"
+  }
+}
