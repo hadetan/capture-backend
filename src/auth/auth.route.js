@@ -1,7 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const authController = require('./auth.controller');
-const { validateRegister, validateLogin, validateEmptyBody, validateProfileUpdate } = require('./auth.validation');
+const { validateGoogleSession, validateEmptyBody, validateRefreshSession } = require('./auth.validation');
 const { authenticate } = require('./auth.middleware');
 
 const router = express.Router();
@@ -14,10 +14,9 @@ const authRateLimiter = rateLimit({
     message: { error: 'Too many authentication attempts, please try again later.' },
 });
 
-router.post('/register', authRateLimiter, validateRegister, authController.register);
-router.post('/login', authRateLimiter, validateLogin, authController.login);
-router.post('/logout', validateEmptyBody, authController.logout);
-router.post('/refresh', authRateLimiter, validateEmptyBody, authController.refresh);
-router.patch('/profile', authenticate, validateProfileUpdate, authController.updateProfile);
+router.post('/google/session', authRateLimiter, validateGoogleSession, authController.exchangeGoogleSession);
+router.post('/google/session/refresh', authRateLimiter, validateRefreshSession, authController.refreshSession);
+router.post('/logout', authenticate, validateEmptyBody, authController.logout);
+router.get('/me', authenticate, authController.getProfile);
 
 module.exports = router;
