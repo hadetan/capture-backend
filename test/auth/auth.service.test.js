@@ -1,290 +1,451 @@
-const { register, login, logout, refreshSession, updateProfile } = require('../../src/auth/auth.service');
-const { ApiError } = require('../../src/utils');
+const loadUtils = () => require('../../src/utils');
 
-jest.mock('../../src/config/supabase', () => ({
-    getSupabaseClient: jest.fn(),
-}));
+const setup = (settingsOverrides = {}) => {
+    jest.resetModules();
 
-jest.mock('../../src/config/prisma', () => ({
-    getPrismaClient: jest.fn(),
-}));
+    jest.doMock('../../src/config/supabase', () => ({
+        getSupabaseClient: jest.fn(),
+    }));
 
-const { getSupabaseClient } = require('../../src/config/supabase');
-const { getPrismaClient } = require('../../src/config/prisma');
+    jest.doMock('../../src/config/prisma', () => ({
+        getPrismaClient: jest.fn(),
+    }));
 
-describe('Auth Service', () => {
-    let mockAuth;
-    let mockPrisma;
+    const service = require('../../src/auth/auth.service');
+    const { getSupabaseClient } = require('../../src/config/supabase');
+    const { getPrismaClient } = require('../../src/config/prisma');
 
-    beforeEach(() => {
-        mockAuth = {
-            signUp: jest.fn(),
-            signInWithPassword: jest.fn(),
-            signOut: jest.fn(),
-            refreshSession: jest.fn(),
+    const defaultSettings = {
+        external: { google: { enabled: true } },
+        jwt_expiry: 18000,
+        refresh_token_expiry: 2592000,
+    };
+
+    const mergedSettings = {
+        ...defaultSettings,
+        ...settingsOverrides,
+        external: {
+            google: {
+                enabled:
+                    settingsOverrides?.external?.google?.enabled ?? defaultSettings.external.google.enabled,
+            },
+        },
+    };
+
+    const mockGetSettings = jest.fn().mockResolvedValue({ data: { settings: mergedSettings }, error: null });
+    const mockGetUser = jest.fn();
+    const mockRefreshSession = jest.fn();
+    const mockAdminSignOut = jest.fn().mockResolvedValue({ error: null });
+
+    getSupabaseClient.mockReturnValue({
+        auth: {
+            getUser: mockGetUser,
+            refreshSession: mockRefreshSession,
             admin: {
-                updateUserById: jest.fn(),
+                getSettings: mockGetSettings,
+                signOut: mockAdminSignOut,
             },
-        };
-
-        getSupabaseClient.mockReturnValue({ auth: mockAuth });
-
-        mockPrisma = {
-            user: {
-                upsert: jest.fn(),
-                findUnique: jest.fn(),
-            },
-        };
-
-        getPrismaClient.mockReturnValue(mockPrisma);
+        },
     });
 
+    const mockPrisma = {
+        user: {
+            findUnique: jest.fn(),
+            upsert: jest.fn(),
+            update: jest.fn(),
+        },
+    };
+
+    getPrismaClient.mockReturnValue(mockPrisma);
+
+    return {
+        service,
+        getSupabaseClient,
+        getPrismaClient,
+        mockGetSettings,
+        mockGetUser,
+        mockAdminSignOut,
+        mockPrisma,
+        mockRefreshSession,
+    };
+};
+
+describe('Auth Service', () => {
     afterEach(() => {
         jest.clearAllMocks();
     });
 
-    describe('register', () => {
-        it('registers a user and returns session data', async () => {
-            const response = {
-                user: { id: 'user-123', email: 'user@example.com' },
-                session: { refresh_token: 'refresh', access_token: 'access', expires_in: 3600, token_type: 'bearer' },
-            };
-            const persistedUser = { id: 'user-123', email: 'user@example.com', name: 'Test' };
-
-            mockAuth.signUp.mockResolvedValue({ data: response, error: null });
-            mockPrisma.user.upsert.mockResolvedValue(persistedUser);
-
-            const result = await register({ email: 'user@example.com', password: 'Password123', metadata: { name: 'Test' } });
-
-            expect(mockAuth.signUp).toHaveBeenCalledWith({
-                email: 'user@example.com',
-                password: 'Password123',
-                options: { data: { name: 'Test' } },
-            });
-            expect(mockPrisma.user.upsert).toHaveBeenCalledWith({
-                where: { id: 'user-123' },
-                create: { id: 'user-123', email: 'user@example.com', name: 'Test' },
-                update: { email: 'user@example.com', name: 'Test' },
-            });
-            expect(result).toMatchObject({ user: persistedUser, session: response.session, profileComplete: false });
-        });
-
-        it('throws ApiError when Supabase returns error', async () => {
-            mockAuth.signUp.mockResolvedValue({ data: null, error: { message: 'Invalid', status: 400 } });
-
-            await expect(register({ email: 'user@example.com', password: 'Password123' })).rejects.toBeInstanceOf(ApiError);
-            expect(mockAuth.signUp).toHaveBeenCalled();
-        });
+    const buildSupabaseUser = (overrides = {}) => ({
+        id: 'supabase-user-id',
+        email: 'user@example.com',
+        app_metadata: { provider: 'google', provider_id: 'google|sub-123' },
+        user_metadata: {
+            full_name: 'Test User',
+            avatar_url: 'https://example.com/avatar.png',
+            locale: 'IN',
+        },
+        last_sign_in_at: '2025-12-30T00:00:00.000Z',
+        identities: [
+            {
+                provider: 'google',
+                identity_data: { sub: 'sub-123' },
+            },
+        ],
+        ...overrides,
     });
 
-    describe('login', () => {
-        it('logs in a user with valid credentials', async () => {
-            const response = {
-                user: { id: 'user-123', email: 'user@example.com', user_metadata: { name: 'Login User' } },
-                session: { refresh_token: 'refresh', access_token: 'access', expires_in: 3600, token_type: 'bearer' },
-            };
-            const persistedUser = { id: 'user-123', email: 'user@example.com', name: 'Login User' };
+    describe('consumeGoogleSession', () => {
+        it('upserts user and returns normalized payload', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+                mockPrisma,
+                mockGetSettings,
+            } = setup();
 
-            mockAuth.signInWithPassword.mockResolvedValue({ data: response, error: null });
-            mockPrisma.user.upsert.mockResolvedValue(persistedUser);
-
-            const result = await login({ email: 'user@example.com', password: 'Password123' });
-
-            expect(mockAuth.signInWithPassword).toHaveBeenCalledWith({
-                email: 'user@example.com',
-                password: 'Password123',
-            });
-            expect(mockPrisma.user.upsert).toHaveBeenCalledWith({
-                where: { id: 'user-123' },
-                create: { id: 'user-123', email: 'user@example.com', name: 'Login User' },
-                update: { email: 'user@example.com', name: 'Login User' },
-            });
-            expect(result).toMatchObject({ user: persistedUser, session: response.session, profileComplete: false });
-        });
-
-        it('uses existing profile when upsert returns nothing', async () => {
-            const response = {
-                user: { id: 'user-456', email: 'persisted@example.com', user_metadata: { name: 'Existing' } },
-                session: { refresh_token: 'refresh', access_token: 'access', expires_in: 3600, token_type: 'bearer' },
-            };
-            const existingProfile = { id: 'user-456', email: 'persisted@example.com', name: 'Existing' };
-
-            mockAuth.signInWithPassword.mockResolvedValue({ data: response, error: null });
-            mockPrisma.user.upsert.mockResolvedValue(null);
-            mockPrisma.user.findUnique.mockResolvedValue(existingProfile);
-
-            const result = await login({ email: 'persisted@example.com', password: 'Password123' });
-
-            expect(mockPrisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'user-456' } });
-            expect(result).toMatchObject({ user: existingProfile, session: response.session, profileComplete: false });
-        });
-
-        it('throws ApiError when profile is missing after login', async () => {
-            const response = {
-                user: { id: 'user-789', email: 'missing@example.com', user_metadata: {} },
-                session: { refresh_token: 'refresh', access_token: 'access', expires_in: 3600, token_type: 'bearer' },
+            const supabaseUser = buildSupabaseUser();
+            const prismaUser = {
+                id: 'local-user-id',
+                email: supabaseUser.email,
+                fullName: 'Test User',
+                avatarUrl: 'https://example.com/avatar.png',
+                countryCode: 'IN',
+                trialStatus: 'ELIGIBLE',
+                trialEndsAt: null,
+                trialUsageSeconds: 0,
+                trialUsageCapSeconds: null,
+                nextUsageResetAt: null,
+                subscription: null,
+                lastLoginAt: new Date('2025-12-30T00:00:00.000Z'),
             };
 
-            mockAuth.signInWithPassword.mockResolvedValue({ data: response, error: null });
-            mockPrisma.user.upsert.mockResolvedValue(null);
+            mockGetUser.mockResolvedValue({ data: { user: supabaseUser }, error: null });
             mockPrisma.user.findUnique.mockResolvedValue(null);
+            mockPrisma.user.upsert.mockResolvedValue(prismaUser);
 
-            await expect(login({ email: 'missing@example.com', password: 'Password123' })).rejects.toBeInstanceOf(ApiError);
+            const result = await consumeGoogleSession({
+                accessToken: 'access-token',
+                refreshToken: 'refresh-token',
+                expiresIn: 3600,
+                tokenType: 'bearer',
+            });
+
+            expect(mockGetSettings).toHaveBeenCalledTimes(1);
+            expect(mockGetUser).toHaveBeenCalledWith('access-token');
+            expect(mockPrisma.user.upsert).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    where: { supabaseUserId: supabaseUser.id },
+                    include: { subscription: true },
+                })
+            );
+            expect(result).toEqual({
+                user: {
+                    id: 'local-user-id',
+                    email: 'user@example.com',
+                    fullName: 'Test User',
+                    avatarUrl: 'https://example.com/avatar.png',
+                    countryCode: 'IN',
+                    trialStatus: 'ELIGIBLE',
+                    trialEndsAt: null,
+                    trialUsageSeconds: 0,
+                    trialUsageCapSeconds: null,
+                    nextUsageResetAt: null,
+                    subscription: null,
+                    lastLoginAt: prismaUser.lastLoginAt,
+                },
+                supabaseUser,
+                session: {
+                    accessToken: 'access-token',
+                    refreshToken: 'refresh-token',
+                    expiresIn: 3600,
+                    refreshExpiresIn: 2592000,
+                    tokenType: 'bearer',
+                },
+                profileComplete: true,
+                isNewUser: true,
+            });
         });
 
-        it('throws ApiError on invalid credentials', async () => {
-            mockAuth.signInWithPassword.mockResolvedValue({ data: null, error: { message: 'Invalid login', status: 401 } });
+        it('flags returning users correctly', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+                mockPrisma,
+            } = setup();
 
-            await expect(login({ email: 'user@example.com', password: 'wrong' })).rejects.toBeInstanceOf(ApiError);
+            const supabaseUser = buildSupabaseUser();
+            const existingUser = { id: 'existing', fullName: 'Old User', subscription: null };
+
+            mockGetUser.mockResolvedValue({ data: { user: supabaseUser }, error: null });
+            mockPrisma.user.findUnique.mockResolvedValue(existingUser);
+            mockPrisma.user.upsert.mockResolvedValue({ ...existingUser, email: supabaseUser.email });
+
+            const result = await consumeGoogleSession({
+                accessToken: 'access',
+                refreshToken: 'refresh',
+                expiresIn: 3600,
+                tokenType: 'bearer',
+            });
+
+            expect(result.session.refreshExpiresIn).toBe(2592000);
+            expect(result.isNewUser).toBe(false);
+        });
+
+        it('throws when Google provider disabled', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+            } = setup({ external: { google: { enabled: false } } });
+
+            mockGetUser.mockResolvedValue({ data: { user: buildSupabaseUser() }, error: null });
+
+            await expect(
+                consumeGoogleSession({ accessToken: 'token', refreshToken: 'refresh', expiresIn: 3600, tokenType: 'bearer' })
+            ).rejects.toThrow('Google authentication is not enabled in Supabase');
+        });
+
+        it('rejects when token ttl exceeds maximum', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+            } = setup();
+
+            mockGetUser.mockResolvedValue({ data: { user: buildSupabaseUser() }, error: null });
+
+            await expect(
+                consumeGoogleSession({ accessToken: 'token', refreshToken: 'refresh', expiresIn: 19000, tokenType: 'bearer' })
+            ).rejects.toThrow('Access token lifetime exceeds supported maximum');
+        });
+
+        it('rejects non-Google providers', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+            } = setup();
+
+            mockGetUser.mockResolvedValue({ data: { user: buildSupabaseUser({ app_metadata: { provider: 'github' } }) }, error: null });
+
+            await expect(
+                consumeGoogleSession({ accessToken: 'token', refreshToken: 'refresh', expiresIn: 3600, tokenType: 'bearer' })
+            ).rejects.toThrow('Only Google sign-ins are supported');
+        });
+
+        it('rejects when Google identity missing', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+            } = setup();
+
+            mockGetUser.mockResolvedValue({ data: { user: buildSupabaseUser({ identities: [] }) }, error: null });
+
+            await expect(
+                consumeGoogleSession({ accessToken: 'token', refreshToken: 'refresh', expiresIn: 3600, tokenType: 'bearer' })
+            ).rejects.toThrow('Google identity is not linked to this user');
+        });
+
+        it('propagates Supabase getUser failures', async () => {
+            const {
+                service: { consumeGoogleSession },
+                mockGetUser,
+            } = setup();
+
+            mockGetUser.mockResolvedValue({ data: { user: null }, error: { message: 'Expired', status: 401 } });
+
+            await expect(
+                consumeGoogleSession({ accessToken: 'token', refreshToken: 'refresh', expiresIn: 3600, tokenType: 'bearer' })
+            ).rejects.toThrow('Invalid or expired Supabase access token');
         });
     });
 
     describe('logout', () => {
-        it('logs out via Supabase with refresh token', async () => {
-            mockAuth.signOut.mockResolvedValue({ error: null });
+        it('signs out user via Supabase admin', async () => {
+            const {
+                service: { logout },
+                mockAdminSignOut,
+            } = setup();
 
-            await expect(logout('refresh-token')).resolves.toBeUndefined();
-            expect(mockAuth.signOut).toHaveBeenCalledWith({ refreshToken: 'refresh-token' });
+            await expect(logout({ id: 'supabase-user-id' })).resolves.toBeUndefined();
+            expect(mockAdminSignOut).toHaveBeenCalledWith('supabase-user-id');
         });
 
-        it('throws ApiError when Supabase logout fails', async () => {
-            mockAuth.signOut.mockResolvedValue({ error: { message: 'Failed to logout', status: 400 } });
+        it('throws when user context missing', async () => {
+            const {
+                service: { logout },
+            } = setup();
 
-            await expect(logout('refresh-token')).rejects.toBeInstanceOf(ApiError);
+            await expect(logout(null)).rejects.toBeInstanceOf(loadUtils().ApiError);
+        });
+    });
+
+    describe('getProfile', () => {
+        it('returns prisma user payload', async () => {
+            const {
+                service: { getProfile },
+                mockPrisma,
+            } = setup();
+
+            const prismaUser = {
+                id: 'local-user',
+                email: 'user@example.com',
+                fullName: 'Test User',
+                avatarUrl: 'https://example.com/avatar.png',
+                countryCode: 'IN',
+                trialStatus: 'ELIGIBLE',
+                trialEndsAt: null,
+                trialUsageSeconds: 0,
+                trialUsageCapSeconds: null,
+                nextUsageResetAt: null,
+                subscription: null,
+                lastLoginAt: new Date(),
+            };
+
+            mockPrisma.user.findUnique.mockResolvedValue(prismaUser);
+
+            const result = await getProfile({ id: 'supabase-user-id' });
+
+            expect(mockPrisma.user.findUnique).toHaveBeenCalledWith({
+                where: { supabaseUserId: 'supabase-user-id' },
+                include: { subscription: true },
+            });
+            expect(result).toEqual({
+                user: {
+                    id: 'local-user',
+                    email: 'user@example.com',
+                    fullName: 'Test User',
+                    avatarUrl: 'https://example.com/avatar.png',
+                    countryCode: 'IN',
+                    trialStatus: 'ELIGIBLE',
+                    trialEndsAt: null,
+                    trialUsageSeconds: 0,
+                    trialUsageCapSeconds: null,
+                    nextUsageResetAt: null,
+                    subscription: null,
+                    lastLoginAt: prismaUser.lastLoginAt,
+                },
+                profileComplete: true,
+            });
+        });
+
+        it('throws when profile missing', async () => {
+            const {
+                service: { getProfile },
+                mockPrisma,
+            } = setup();
+
+            mockPrisma.user.findUnique.mockResolvedValue(null);
+
+            await expect(getProfile({ id: 'missing' })).rejects.toBeInstanceOf(loadUtils().ApiError);
+        });
+
+        it('throws when auth context missing', async () => {
+            const {
+                service: { getProfile },
+            } = setup();
+
+            await expect(getProfile(null)).rejects.toBeInstanceOf(loadUtils().ApiError);
+        });
+    });
+
+    describe('isProfileComplete', () => {
+        it('returns true when fullName present', () => {
+            const {
+                service: { isProfileComplete },
+            } = setup();
+
+            expect(isProfileComplete({ fullName: 'Name' })).toBe(true);
+            expect(isProfileComplete({})).toBe(false);
         });
     });
 
     describe('refreshSession', () => {
-        it('refreshes a session using refresh token', async () => {
-            const response = {
-                user: { id: 'user-123', email: 'user@example.com', user_metadata: { name: 'User' } },
-                session: { refresh_token: 'refresh-2', access_token: 'access-2', expires_in: 3600, token_type: 'bearer' },
+        it('refreshes session and updates user record', async () => {
+            const {
+                service: { refreshSession },
+                mockRefreshSession,
+                mockPrisma,
+                mockGetSettings,
+            } = setup();
+
+            const supabaseUser = buildSupabaseUser();
+            const prismaUser = {
+                id: 'local-user-id',
+                email: supabaseUser.email,
+                fullName: 'Test User',
+                avatarUrl: 'https://example.com/avatar.png',
+                countryCode: 'IN',
+                trialStatus: 'ELIGIBLE',
+                trialEndsAt: null,
+                trialUsageSeconds: 0,
+                trialUsageCapSeconds: null,
+                nextUsageResetAt: null,
+                subscription: null,
+                lastLoginAt: new Date(),
             };
-            const persistedUser = { id: 'user-123', email: 'user@example.com', name: 'User' };
 
-            mockAuth.refreshSession.mockResolvedValue({ data: response, error: null });
-            mockPrisma.user.findUnique.mockResolvedValue(persistedUser);
+            mockPrisma.user.findUnique.mockResolvedValue(prismaUser);
+            mockPrisma.user.update.mockResolvedValue(prismaUser);
+            mockRefreshSession.mockResolvedValue({
+                data: {
+                    session: {
+                        access_token: 'new-access',
+                        refresh_token: 'new-refresh',
+                        expires_in: 1800,
+                        token_type: 'bearer',
+                        user: supabaseUser,
+                    },
+                },
+                error: null,
+            });
 
-            const result = await refreshSession('refresh');
+            const result = await refreshSession({ refreshToken: 'refresh-token' });
 
-            expect(mockAuth.refreshSession).toHaveBeenCalledWith({ refresh_token: 'refresh' });
-            expect(mockPrisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'user-123' } });
-            expect(result).toMatchObject({ user: persistedUser, session: response.session, profileComplete: false });
+            expect(mockGetSettings).toHaveBeenCalledTimes(1);
+            expect(mockRefreshSession).toHaveBeenCalledWith({ refresh_token: 'refresh-token' });
+            expect(mockPrisma.user.update).toHaveBeenCalledWith(
+                expect.objectContaining({ where: { supabaseUserId: supabaseUser.id } })
+            );
+            expect(result.session).toEqual({
+                accessToken: 'new-access',
+                refreshToken: 'new-refresh',
+                expiresIn: 1800,
+                refreshExpiresIn: 2592000,
+                tokenType: 'bearer',
+            });
+            expect(result.isNewUser).toBe(false);
         });
 
-        it('throws ApiError when refreshed profile is missing', async () => {
-            const response = {
-                user: { id: 'user-999', email: 'user@example.com', user_metadata: {} },
-                session: { refresh_token: 'refresh-2', access_token: 'access-2', expires_in: 3600, token_type: 'bearer' },
-            };
+        it('throws when refresh token missing', async () => {
+            const {
+                service: { refreshSession },
+            } = setup();
 
-            mockAuth.refreshSession.mockResolvedValue({ data: response, error: null });
+            await expect(refreshSession({})).rejects.toBeInstanceOf(loadUtils().ApiError);
+        });
+
+        it('throws when prisma record missing', async () => {
+            const {
+                service: { refreshSession },
+                mockRefreshSession,
+                mockPrisma,
+            } = setup();
+
             mockPrisma.user.findUnique.mockResolvedValue(null);
-            mockPrisma.user.upsert = jest.fn().mockResolvedValue(null);
-
-            await expect(refreshSession('refresh')).rejects.toBeInstanceOf(ApiError);
-        });
-
-        it('throws ApiError on refresh failure', async () => {
-            mockAuth.refreshSession.mockResolvedValue({ data: null, error: { message: 'Expired', status: 401 } });
-
-            await expect(refreshSession('bad-token')).rejects.toBeInstanceOf(ApiError);
-        });
-    });
-
-    describe('updateProfile', () => {
-        const authUser = {
-            id: 'user-123',
-            email: 'user@example.com',
-            user_metadata: {
-                name: 'Existing User',
-                gender: 'male',
-                dob: '1990-01-01',
-                heightFeet: 5,
-                heightInches: 6,
-                religion: 'hindu',
-                caste: 'brahmin',
-                rashi: 'aries',
-            },
-        };
-
-        const payload = {
-            name: 'Updated User',
-            gender: 'female',
-            dob: '1991-02-02',
-            heightFeet: 0,
-            heightInches: 5,
-            religion: 'jain',
-            caste: 'brahmin',
-            rashi: 'taurus',
-            education: 'B.Tech',
-        };
-
-        it('merges metadata and upserts profile', async () => {
-            const updatedProfile = {
-                id: 'user-123',
-                email: 'user@example.com',
-                name: 'Updated User',
-                gender: 'female',
-                dob: new Date('1991-02-02T00:00:00.000Z'),
-                heightFeet: 0,
-                heightInches: 5,
-                religion: 'jain',
-                caste: 'brahmin',
-                rashi: 'taurus',
-                education: 'B.Tech',
-            };
-
-            mockAuth.admin.updateUserById.mockResolvedValue({ error: null });
-            mockPrisma.user.upsert.mockResolvedValue(updatedProfile);
-
-            const result = await updateProfile(authUser, payload);
-
-            expect(mockAuth.admin.updateUserById).toHaveBeenCalledWith('user-123', {
-                user_metadata: expect.objectContaining({
-                    name: 'Updated User',
-                    gender: 'female',
-                    rashi: 'taurus',
-                    education: 'B.Tech',
-                }),
+            mockRefreshSession.mockResolvedValue({
+                data: {
+                    session: {
+                        access_token: 'new-access',
+                        refresh_token: 'new-refresh',
+                        expires_in: 1800,
+                        token_type: 'bearer',
+                        user: buildSupabaseUser(),
+                    },
+                },
+                error: null,
             });
-            expect(mockPrisma.user.upsert).toHaveBeenCalledWith({
-                where: { id: 'user-123' },
-                create: expect.objectContaining({
-                    id: 'user-123',
-                    email: 'user@example.com',
-                    name: 'Updated User',
-                    gender: 'female',
-                    heightFeet: 0,
-                    heightInches: 5,
-                    religion: 'jain',
-                    caste: 'brahmin',
-                    rashi: 'taurus',
-                }),
-                update: expect.objectContaining({
-                    email: 'user@example.com',
-                    name: 'Updated User',
-                    gender: 'female',
-                    heightFeet: 0,
-                    heightInches: 5,
-                    religion: 'jain',
-                    caste: 'brahmin',
-                    rashi: 'taurus',
-                }),
-            });
-            expect(result).toMatchObject({ user: updatedProfile, session: null, profileComplete: true });
-        });
 
-        it('throws when no metadata provided', async () => {
-            await expect(updateProfile(authUser, {})).rejects.toBeInstanceOf(ApiError);
-            expect(mockAuth.admin.updateUserById).not.toHaveBeenCalled();
-        });
-
-        it('throws when Supabase update fails', async () => {
-            mockAuth.admin.updateUserById.mockResolvedValue({ error: { message: 'failure', status: 400 } });
-
-            await expect(updateProfile(authUser, payload)).rejects.toBeInstanceOf(ApiError);
-            expect(mockPrisma.user.upsert).not.toHaveBeenCalled();
+            await expect(refreshSession({ refreshToken: 'refresh-token' })).rejects.toThrow(
+                'User profile not found for refresh token'
+            );
         });
     });
 });

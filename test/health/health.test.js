@@ -1,3 +1,9 @@
+jest.mock('@prisma/client', () => ({
+    PrismaClient: jest.fn().mockImplementation(() => ({
+        $disconnect: jest.fn(),
+    })),
+}));
+
 const request = require('supertest');
 const { app } = require('../../src/index');
 

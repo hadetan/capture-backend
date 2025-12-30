@@ -1,97 +1,99 @@
-const { ApiError, catchAsync, httpResponse, consts } = require('../utils');
+const { catchAsync, httpResponse } = require('../utils');
+const { ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME } = require('../utils/const');
 const authService = require('./auth.service');
 
-const { httpStatus } = consts;
-
-const DEFAULT_REFRESH_MAX_AGE = 30 * 24 * 60 * 60; // seconds
-
-const buildCookieOptions = () => ({
+const buildCookieOptions = (maxAgeMs) => ({
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/api',
-    maxAge: DEFAULT_REFRESH_MAX_AGE * 1000,
+    maxAge: maxAgeMs,
 });
 
-const setRefreshCookie = (res, refreshToken) => {
-    if (!refreshToken) {
-        return;
-    }
-    res.cookie('refresh_token', refreshToken, buildCookieOptions());
-};
-
-const clearRefreshCookie = (res) => {
-    res.clearCookie('refresh_token', {
-        ...buildCookieOptions(),
+const clearAccessCookie = (res) => {
+    res.clearCookie(ACCESS_COOKIE_NAME, {
+        ...buildCookieOptions(0),
         maxAge: 0,
     });
 };
 
-const createAuthPayload = (session, user, profileComplete) => ({
-    user,
-    accessToken: session?.access_token || null,
-    expiresIn: session?.expires_in || null,
-    tokenType: session?.token_type || null,
-    profileComplete: Boolean(profileComplete),
-});
-
-const getRefreshTokenFromRequest = (req) => {
-    const token = req.cookies?.refresh_token;
-
-    if (!token) {
-        throw new ApiError(httpStatus.UNAUTHORIZED, 'Refresh token missing');
+const setRefreshCookie = (res, refreshToken, expiresInSeconds) => {
+    if (!refreshToken || !expiresInSeconds) {
+        return;
     }
 
-    return token;
+    const maxAgeMs = Math.max(1000, Number(expiresInSeconds) * 1000);
+
+    res.cookie(REFRESH_COOKIE_NAME, refreshToken, buildCookieOptions(maxAgeMs));
 };
 
-const register = catchAsync(async (req, res) => {
-    const { user, session, profileComplete } = await authService.register(req.body);
+const clearRefreshCookie = (res) => {
+    res.clearCookie(REFRESH_COOKIE_NAME, {
+        ...buildCookieOptions(0),
+        maxAge: 0,
+    });
+};
 
-    setRefreshCookie(res, session?.refresh_token);
+const setSessionCookies = (res, session) => {
+    // Defensive cleanup: access token cookies were used historically, so clear any leftover values.
+    clearAccessCookie(res);
+    setRefreshCookie(res, session?.refreshToken, session?.refreshExpiresIn);
+};
 
-    httpResponse.created(
-        res,
-        createAuthPayload(session, user, profileComplete),
-        session ? 'Registered' : 'Registered. Verification pending'
-    );
+const buildAuthResponse = ({ user, session, profileComplete, isNewUser }) => ({
+    user,
+    session: {
+        accessToken: session?.accessToken ?? null,
+        expiresIn: session?.expiresIn ?? null,
+        refreshExpiresIn: session?.refreshExpiresIn ?? null,
+        tokenType: session?.tokenType ?? null,
+    },
+    profileComplete: Boolean(profileComplete),
+    isNewUser: Boolean(isNewUser),
 });
 
-const login = catchAsync(async (req, res) => {
-    const { user, session, profileComplete } = await authService.login(req.body);
+const exchangeGoogleSession = catchAsync(async (req, res) => {
+    const result = await authService.consumeGoogleSession(req.body);
 
-    setRefreshCookie(res, session?.refresh_token);
+    setSessionCookies(res, result.session);
 
-    httpResponse.success(res, createAuthPayload(session, user, profileComplete), 'Logged in');
+    const responder = result.isNewUser ? httpResponse.created : httpResponse.success;
+    const message = result.isNewUser ? 'Registered with Google' : 'Authenticated with Google';
+
+    responder(res, buildAuthResponse(result), message);
+});
+
+const refreshSession = catchAsync(async (req, res) => {
+    const refreshToken = req.body?.refreshToken || req.cookies?.[REFRESH_COOKIE_NAME];
+    const result = await authService.refreshSession({ refreshToken });
+
+    setSessionCookies(res, result.session);
+
+    httpResponse.success(res, buildAuthResponse(result), 'Session refreshed');
 });
 
 const logout = catchAsync(async (req, res) => {
-    const refreshToken = getRefreshTokenFromRequest(req);
+    const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
 
-    await authService.logout(refreshToken);
+    await authService.logout({
+        id: req.authUser?.id,
+        accessToken: req.accessToken,
+        refreshToken,
+    });
+    clearAccessCookie(res);
     clearRefreshCookie(res);
     httpResponse.success(res, null, 'Logged out');
 });
 
-const refresh = catchAsync(async (req, res) => {
-    const refreshToken = getRefreshTokenFromRequest(req);
-    const { user, session, profileComplete } = await authService.refreshSession(refreshToken);
+const getProfile = catchAsync(async (req, res) => {
+    const payload = await authService.getProfile(req.authUser);
 
-    setRefreshCookie(res, session?.refresh_token);
-
-    httpResponse.success(res, createAuthPayload(session, user, profileComplete), 'Session refreshed');
-});
-
-const updateProfile = catchAsync(async (req, res) => {
-    const { user, profileComplete } = await authService.updateProfile(req.authUser, req.body);
-
-    httpResponse.success(res, { user, profileComplete }, 'Profile updated');
+    httpResponse.success(res, payload, 'Profile retrieved');
 });
 
 module.exports = {
-    register,
-    login,
+    exchangeGoogleSession,
     logout,
-    refresh,
-    updateProfile,
+    getProfile,
+    refreshSession,
 };

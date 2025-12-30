@@ -1,7 +1,7 @@
 const { ApiError, consts } = require('../utils');
 const { getSupabaseClient } = require('../config/supabase');
 
-const { httpStatus } = consts;
+const { httpStatus, ACCESS_COOKIE_NAME } = consts;
 
 const extractBearerToken = (authorizationHeader = '') => {
     if (typeof authorizationHeader !== 'string') {
@@ -17,9 +17,25 @@ const extractBearerToken = (authorizationHeader = '') => {
     return match[1].trim();
 };
 
+const getAccessTokenFromRequest = (req) => {
+    const headerToken = extractBearerToken(req.headers?.authorization);
+
+    if (headerToken) {
+        return headerToken;
+    }
+
+    const cookieToken = req.cookies?.[ACCESS_COOKIE_NAME];
+
+    if (typeof cookieToken === 'string' && cookieToken.trim().length) {
+        return cookieToken.trim();
+    }
+
+    return null;
+};
+
 const authenticate = async (req, _res, next) => {
     try {
-        const token = extractBearerToken(req.headers?.authorization);
+        const token = getAccessTokenFromRequest(req);
 
         if (!token) {
             throw new ApiError(httpStatus.UNAUTHORIZED, 'Access token missing');
@@ -44,4 +60,4 @@ const authenticate = async (req, _res, next) => {
     }
 };
 
-module.exports = { authenticate, extractBearerToken };
+module.exports = { authenticate, extractBearerToken, getAccessTokenFromRequest };

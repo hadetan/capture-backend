@@ -1,94 +1,14 @@
 const { ApiError, consts } = require('../utils');
 const { getSupabaseClient } = require('../config/supabase');
 const { getPrismaClient } = require('../config/prisma');
-const { validateSchema } = require('../utils/custom.validation');
-const { metadataSchema } = require('./auth.validation');
 
 const { httpStatus } = consts;
 
-const hasNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
+const MAX_ACCESS_TOKEN_TTL_SECONDS = 5 * 60 * 60;
+const MAX_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-const hasValidDate = (value) => value instanceof Date || (typeof value === 'string' && value.trim().length > 0);
-
-const hasNonNegativeInteger = (value) => Number.isInteger(value) && value >= 0;
-
-const isProfileComplete = (profile = {}) => {
-    if (!profile || typeof profile !== 'object') {
-        return false;
-    }
-
-    const hasName = hasNonEmptyString(profile.name);
-    const hasGender = hasNonEmptyString(profile.gender);
-    const hasDob = hasValidDate(profile.dob);
-    const hasHeightFeet = hasNonNegativeInteger(profile.heightFeet);
-    const hasHeightInches = hasNonNegativeInteger(profile.heightInches);
-    const hasHeight =
-        hasHeightFeet &&
-        hasHeightInches &&
-        ((profile.heightFeet ?? 0) > 0 || (profile.heightInches ?? 0) > 0);
-    const hasReligion = hasNonEmptyString(profile.religion);
-    const hasCaste = hasNonEmptyString(profile.caste);
-    const hasRashi = hasNonEmptyString(profile.rashi);
-
-    return hasName && hasGender && hasDob && hasHeight && hasReligion && hasCaste && hasRashi;
-};
-
-const sanitizeMetadata = (metadata = {}) => {
-    if (!metadata || typeof metadata !== 'object') {
-        return {};
-    }
-
-    return validateSchema(metadataSchema, metadata);
-};
-
-const buildUserPayload = (user = {}, metadata = {}) => {
-    if (!user?.id || !user?.email) {
-        return null;
-    }
-
-    const sanitizedMetadata = sanitizeMetadata(metadata);
-
-    const payload = {
-        id: user.id,
-        email: user.email,
-        ...sanitizedMetadata,
-    };
-
-    return payload;
-};
-
-const upsertUserProfile = async (user, metadata = {}) => {
-    const prisma = getPrismaClient();
-    const payload = buildUserPayload(user, metadata);
-
-    if (!payload) {
-        return null;
-    }
-
-    const { id, ...rest } = payload;
-
-    try {
-        return await prisma.user.upsert({
-            where: { id },
-            create: payload,
-            update: rest,
-        });
-    } catch (error) {
-        if (error instanceof ApiError) {
-            throw error;
-        }
-        throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Failed to synchronize user profile');
-    }
-};
-
-const getUserProfile = async (id) => {
-    if (!id) {
-        return null;
-    }
-    const prisma = getPrismaClient();
-
-    return prisma.user.findUnique({ where: { id } });
-};
+let googleProviderValidated = false;
+let supabaseAuthSettings = null;
 
 const toApiError = (error, fallbackStatus) => {
     const status = error?.status || fallbackStatus || httpStatus.BAD_REQUEST;
@@ -97,132 +17,348 @@ const toApiError = (error, fallbackStatus) => {
     return new ApiError(status, message);
 };
 
-const normalizeAuthResponse = (session = null, userProfile = null) => ({
-    user: userProfile,
-    session,
-    profileComplete: isProfileComplete(userProfile),
-});
+const ensureGoogleProviderConfigured = async () => {
+    if (googleProviderValidated) {
+        return;
+    }
 
-const register = async ({ email, password, metadata }) => {
-    const sanitizedMetadata = sanitizeMetadata(metadata);
     const client = getSupabaseClient();
-    const { data, error } = await client.auth.signUp({
+
+    if (!client?.auth?.admin?.getSettings) {
+        googleProviderValidated = true;
+
+        return;
+    }
+
+    const { data, error } = await client.auth.admin.getSettings();
+
+    if (error) {
+        throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Unable to verify Supabase auth settings');
+    }
+
+    const settings = data?.settings || data || {};
+    const googleEnabled = Boolean(settings?.external?.google?.enabled);
+
+    if (!googleEnabled) {
+        throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Google authentication is not enabled in Supabase');
+    }
+
+    const jwtExpiry = Number(settings?.jwt_expiry || settings?.jwtExpiry || 0);
+
+    if (jwtExpiry && jwtExpiry > MAX_ACCESS_TOKEN_TTL_SECONDS) {
+        throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Supabase access token lifetime exceeds 5 hours');
+    }
+
+    const refreshExpiry = Number(settings?.refresh_token_expiry || settings?.refreshTokenExpiry || 0);
+
+    if (refreshExpiry && refreshExpiry > MAX_REFRESH_TOKEN_TTL_SECONDS) {
+        throw new ApiError(httpStatus.SERVICE_UNAVAILABLE, 'Supabase refresh token lifetime exceeds 30 days');
+    }
+
+    supabaseAuthSettings = settings;
+    googleProviderValidated = true;
+};
+
+const getRefreshTokenTtlSeconds = () => {
+    const configuredTtl =
+        Number(supabaseAuthSettings?.refresh_token_expiry ?? supabaseAuthSettings?.refreshTokenExpiry) ||
+        MAX_REFRESH_TOKEN_TTL_SECONDS;
+
+    return Math.min(configuredTtl, MAX_REFRESH_TOKEN_TTL_SECONDS);
+};
+
+const extractGoogleIdentity = (supabaseUser) => {
+    const identities = Array.isArray(supabaseUser?.identities) ? supabaseUser.identities : [];
+
+    return identities.find((identity) => identity?.provider === 'google') || null;
+};
+
+const extractGoogleSub = (supabaseUser, googleIdentity) => {
+    return (
+        googleIdentity?.identity_data?.sub ||
+        supabaseUser?.app_metadata?.provider_id ||
+        supabaseUser?.user_metadata?.sub ||
+        null
+    );
+};
+
+const deriveFullName = (metadata = {}) => {
+    if (metadata.full_name) {
+        return metadata.full_name;
+    }
+
+    if (metadata.name) {
+        return metadata.name;
+    }
+
+    const given = metadata.given_name || metadata.first_name;
+    const family = metadata.family_name || metadata.last_name;
+
+    if (given && family) {
+        return `${given} ${family}`.trim();
+    }
+
+    if (given) {
+        return given;
+    }
+
+    if (family) {
+        return family;
+    }
+
+    return null;
+};
+
+const mapUserForPersistence = (supabaseUser, googleIdentity) => {
+    if (!supabaseUser?.id || !supabaseUser?.email) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Supabase user payload incomplete');
+    }
+
+    const googleSub = extractGoogleSub(supabaseUser, googleIdentity);
+
+    if (!googleSub) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Google identity is missing a subject identifier');
+    }
+
+    const metadata = supabaseUser.user_metadata || {};
+
+    return {
+        supabaseUserId: supabaseUser.id,
+        email: supabaseUser.email,
+        googleSub,
+        fullName: deriveFullName(metadata),
+        avatarUrl: metadata.avatar_url || metadata.picture || null,
+        countryCode: metadata.locale || metadata.country || null,
+        lastLoginAt: supabaseUser.last_sign_in_at ? new Date(supabaseUser.last_sign_in_at) : new Date(),
+    };
+};
+
+const presentUser = (user) => {
+    if (!user) {
+        return null;
+    }
+
+    const {
+        id,
         email,
-        password,
-        options: Object.keys(sanitizedMetadata).length ? { data: sanitizedMetadata } : undefined,
+        fullName,
+        avatarUrl,
+        countryCode,
+        trialStatus,
+        trialEndsAt,
+        trialUsageSeconds,
+        trialUsageCapSeconds,
+        subscription,
+        lastLoginAt,
+        nextUsageResetAt,
+    } = user;
+
+    return {
+        id,
+        email,
+        fullName,
+        avatarUrl,
+        countryCode,
+        trialStatus,
+        trialEndsAt,
+        trialUsageSeconds,
+        trialUsageCapSeconds,
+        nextUsageResetAt,
+        subscription,
+        lastLoginAt,
+    };
+};
+
+const isProfileComplete = (user) => Boolean(user?.fullName);
+
+const consumeGoogleSession = async ({ accessToken, refreshToken, expiresIn, tokenType }) => {
+    await ensureGoogleProviderConfigured();
+
+    if (Number(expiresIn) > MAX_ACCESS_TOKEN_TTL_SECONDS) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Access token lifetime exceeds supported maximum');
+    }
+
+    const client = getSupabaseClient();
+    const { data, error } = await client.auth.getUser(accessToken);
+
+    if (error || !data?.user) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Invalid or expired Supabase access token');
+    }
+
+    const supabaseUser = data.user;
+
+    if (supabaseUser?.app_metadata?.provider !== 'google') {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Only Google sign-ins are supported');
+    }
+
+    const googleIdentity = extractGoogleIdentity(supabaseUser);
+
+    if (!googleIdentity) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Google identity is not linked to this user');
+    }
+
+    const prisma = getPrismaClient();
+    const existingUser = await prisma.user.findUnique({
+        where: { supabaseUserId: supabaseUser.id },
+        include: { subscription: true },
     });
 
-    if (error) {
-        throw toApiError(error, httpStatus.BAD_REQUEST);
-    }
+    const persistencePayload = mapUserForPersistence(supabaseUser, googleIdentity);
 
-    const profile = await upsertUserProfile(data?.user, sanitizedMetadata);
-
-    if (!profile) {
-        throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Failed to create user profile');
-    }
-
-    return normalizeAuthResponse(data?.session ?? null, profile);
-};
-
-const login = async ({ email, password }) => {
-    const client = getSupabaseClient();
-    const { data, error } = await client.auth.signInWithPassword({
-        email,
-        password,
+    const userRecord = await prisma.user.upsert({
+        where: { supabaseUserId: supabaseUser.id },
+        create: persistencePayload,
+        update: {
+            email: persistencePayload.email,
+            googleSub: persistencePayload.googleSub,
+            fullName: persistencePayload.fullName,
+            avatarUrl: persistencePayload.avatarUrl,
+            countryCode: persistencePayload.countryCode,
+            lastLoginAt: persistencePayload.lastLoginAt,
+        },
+        include: { subscription: true },
     });
 
-    if (error) {
-        throw toApiError(error, httpStatus.UNAUTHORIZED);
-    }
-
-    if (!data?.user) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User account not found');
-    }
-
-    const metadata = data?.user?.user_metadata || {};
-    const profile = await upsertUserProfile(data.user, metadata);
-    const existingProfile = profile ?? (await getUserProfile(data.user.id));
-
-    if (!existingProfile) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User profile not found');
-    }
-
-    return normalizeAuthResponse(data.session ?? null, existingProfile);
+    return {
+        user: presentUser(userRecord),
+        supabaseUser,
+        session: {
+            accessToken,
+            refreshToken,
+            expiresIn,
+            refreshExpiresIn: getRefreshTokenTtlSeconds(),
+            tokenType: tokenType || 'bearer',
+        },
+        profileComplete: isProfileComplete(userRecord),
+        isNewUser: !existingUser,
+    };
 };
 
-const logout = async (refreshToken) => {
-    const client = getSupabaseClient();
-    const { error } = await client.auth.signOut({ refreshToken });
+const refreshSession = async ({ refreshToken }) => {
+    await ensureGoogleProviderConfigured();
 
-    if (error) {
-        throw toApiError(error, httpStatus.BAD_REQUEST);
+    if (!refreshToken || typeof refreshToken !== 'string' || !refreshToken.trim()) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Refresh token missing');
     }
-};
 
-const refreshSession = async (refreshToken) => {
     const client = getSupabaseClient();
     const { data, error } = await client.auth.refreshSession({ refresh_token: refreshToken });
 
-    if (error) {
-        throw toApiError(error, httpStatus.UNAUTHORIZED);
+    if (error || !data?.session?.access_token || !data?.session?.user) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Invalid or expired refresh token');
     }
 
-    const metadata = data?.user?.user_metadata || {};
-    const profile = (await getUserProfile(data?.user?.id)) || (await upsertUserProfile(data?.user, metadata));
+    const session = data.session;
+    const supabaseUser = session.user;
 
-    if (!profile) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User profile not found');
+    if (Number(session.expires_in) > MAX_ACCESS_TOKEN_TTL_SECONDS) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Access token lifetime exceeds supported maximum');
     }
 
-    return normalizeAuthResponse(data?.session ?? null, profile);
+    if (supabaseUser?.app_metadata?.provider !== 'google') {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Only Google sign-ins are supported');
+    }
+
+    const googleIdentity = extractGoogleIdentity(supabaseUser);
+
+    if (!googleIdentity) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Google identity is not linked to this user');
+    }
+
+    const prisma = getPrismaClient();
+    const existingUser = await prisma.user.findUnique({
+        where: { supabaseUserId: supabaseUser.id },
+        include: { subscription: true },
+    });
+
+    if (!existingUser) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'User profile not found for refresh token');
+    }
+
+    const persistencePayload = mapUserForPersistence(
+        { ...supabaseUser, last_sign_in_at: new Date().toISOString() },
+        googleIdentity
+    );
+
+    const userRecord = await prisma.user.update({
+        where: { supabaseUserId: supabaseUser.id },
+        data: {
+            email: persistencePayload.email,
+            googleSub: persistencePayload.googleSub,
+            fullName: persistencePayload.fullName,
+            avatarUrl: persistencePayload.avatarUrl,
+            countryCode: persistencePayload.countryCode,
+            lastLoginAt: persistencePayload.lastLoginAt,
+        },
+        include: { subscription: true },
+    });
+
+    return {
+        user: presentUser(userRecord),
+        supabaseUser,
+        session: {
+            accessToken: session.access_token,
+            refreshToken: session.refresh_token || refreshToken,
+            expiresIn: session.expires_in,
+            refreshExpiresIn: getRefreshTokenTtlSeconds(),
+            tokenType: session.token_type || 'bearer',
+        },
+        profileComplete: isProfileComplete(userRecord),
+        isNewUser: false,
+    };
 };
 
-const updateProfile = async (authUser, metadata = {}) => {
-    if (!authUser?.id || !authUser?.email) {
+const logout = async (context = {}) => {
+    const { id, accessToken, refreshToken } = context || {};
+    const supabaseUserId = typeof id === 'string' ? id.trim() : '';
+
+    if (!supabaseUserId) {
         throw new ApiError(httpStatus.UNAUTHORIZED, 'User context missing');
     }
 
-    const sanitizedMetadata = sanitizeMetadata(metadata);
-
-    if (!Object.keys(sanitizedMetadata).length) {
-        throw new ApiError(httpStatus.BAD_REQUEST, 'No profile data provided');
-    }
-
     const client = getSupabaseClient();
-    const mergedMetadata = {
-        ...(authUser.user_metadata || {}),
-        ...sanitizedMetadata,
-    };
-
-    const { error } = await client.auth.admin.updateUserById(authUser.id, {
-        user_metadata: mergedMetadata,
-    });
+    const { error } = await client.auth.admin.signOut(supabaseUserId);
 
     if (error) {
         throw toApiError(error, httpStatus.BAD_REQUEST);
     }
 
-    const updatedProfile = await upsertUserProfile(
-        {
-            id: authUser.id,
-            email: authUser.email,
-        },
-        mergedMetadata
-    );
+    const hasToken = [accessToken, refreshToken].some((value) => typeof value === 'string' && value.trim().length);
 
-    if (!updatedProfile) {
+    if (hasToken && client?.auth?.signOut) {
+        try {
+            await client.auth.signOut();
+        } catch (signOutError) {
+            // Swallow client-side sign out errors; admin signOut already succeeded.
+        }
+    }
+};
+
+const getProfile = async (authUser) => {
+    if (!authUser?.id) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'User context missing');
+    }
+
+    const prisma = getPrismaClient();
+    const user = await prisma.user.findUnique({
+        where: { supabaseUserId: authUser.id },
+        include: { subscription: true },
+    });
+
+    if (!user) {
         throw new ApiError(httpStatus.NOT_FOUND, 'User profile not found');
     }
 
-    return normalizeAuthResponse(null, updatedProfile);
+    return {
+        user: presentUser(user),
+        profileComplete: isProfileComplete(user),
+    };
 };
 
 module.exports = {
-    register,
-    login,
+    consumeGoogleSession,
     logout,
-    refreshSession,
-    updateProfile,
+    getProfile,
     isProfileComplete,
+    refreshSession,
 };

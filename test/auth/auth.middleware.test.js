@@ -1,4 +1,4 @@
-const { authenticate, extractBearerToken } = require('../../src/auth/auth.middleware');
+const { authenticate, extractBearerToken, getAccessTokenFromRequest } = require('../../src/auth/auth.middleware');
 const { ApiError, consts } = require('../../src/utils');
 
 jest.mock('../../src/config/supabase', () => ({
@@ -30,6 +30,32 @@ describe('extractBearerToken', () => {
     });
 });
 
+describe('getAccessTokenFromRequest', () => {
+    it('prefers bearer token from headers', () => {
+        const req = {
+            headers: { authorization: 'Bearer header-token' },
+            cookies: { 'sb-access-token': 'cookie-token' },
+        };
+
+        expect(getAccessTokenFromRequest(req)).toBe('header-token');
+    });
+
+    it('falls back to cookie token', () => {
+        const req = {
+            headers: {},
+            cookies: { 'sb-access-token': 'cookie-token' },
+        };
+
+        expect(getAccessTokenFromRequest(req)).toBe('cookie-token');
+    });
+
+    it('returns null when neither token is available', () => {
+        const req = { headers: {}, cookies: {} };
+
+        expect(getAccessTokenFromRequest(req)).toBeNull();
+    });
+});
+
 describe('authenticate middleware', () => {
     let req;
     let next;
@@ -37,7 +63,7 @@ describe('authenticate middleware', () => {
     let mockGetUser;
 
     beforeEach(() => {
-        req = { headers: {} };
+        req = { headers: {}, cookies: {} };
         res = {};
         next = jest.fn();
         mockGetUser = jest.fn();
@@ -100,6 +126,19 @@ describe('authenticate middleware', () => {
         expect(req.authUser).toEqual(user);
         expect(req.accessToken).toBe('good-token');
         expect(next).toHaveBeenCalledWith();
+    });
+
+    it('pulls token from cookie when header missing', async () => {
+        req.cookies['sb-access-token'] = 'cookie-token';
+        const user = { id: 'user-cookie' };
+
+        mockGetUser.mockResolvedValue({ data: { user }, error: null });
+
+        await authenticate(req, res, next);
+
+        expect(mockGetUser).toHaveBeenCalledWith('cookie-token');
+        expect(req.authUser).toEqual(user);
+        expect(req.accessToken).toBe('cookie-token');
     });
 
     it('handles unexpected errors as unauthorized', async () => {

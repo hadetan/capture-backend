@@ -2,11 +2,10 @@ const request = require('supertest');
 const app = require('../../src/app');
 
 jest.mock('../../src/auth/auth.service', () => ({
-    register: jest.fn(),
-    login: jest.fn(),
+    consumeGoogleSession: jest.fn(),
     logout: jest.fn(),
+    getProfile: jest.fn(),
     refreshSession: jest.fn(),
-    updateProfile: jest.fn(),
 }));
 
 jest.mock('../../src/auth/auth.middleware', () => ({
@@ -30,76 +29,75 @@ describe('Auth Routes', () => {
         jest.clearAllMocks();
     });
 
-    describe('POST /api/auth/register', () => {
-        it('returns 201 with tokens and sets refresh cookie', async () => {
-            authService.register.mockResolvedValue({
+    describe('POST /api/auth/google/session', () => {
+        const payload = {
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresIn: 3600,
+            tokenType: 'bearer',
+            refreshExpiresIn: 2592000,
+        };
+
+        it('creates new user session and sets cookie', async () => {
+            authService.consumeGoogleSession.mockResolvedValue({
                 user: { id: 'user-123' },
-                session: {
-                    refresh_token: 'refresh-token',
-                    access_token: 'access-token',
-                    expires_in: 3600,
-                    token_type: 'bearer',
-                },
+                session: payload,
                 profileComplete: false,
+                isNewUser: true,
             });
 
-            const res = await request(app)
-                .post('/api/auth/register')
-                .send({ email: 'user@example.com', password: 'Password123', metadata: { name: 'Tester' } });
+            const res = await request(app).post('/api/auth/google/session').send(payload);
 
             expect(res.status).toBe(201);
             expect(res.body).toEqual({
                 success: true,
-                message: 'Registered',
+                message: 'Registered with Google',
                 data: {
                     user: { id: 'user-123' },
-                    accessToken: 'access-token',
-                    expiresIn: 3600,
-                    tokenType: 'bearer',
+                    session: {
+                        accessToken: 'access-token',
+                        expiresIn: 3600,
+                        refreshExpiresIn: 2592000,
+                        tokenType: 'bearer',
+                    },
                     profileComplete: false,
+                    isNewUser: true,
                 },
             });
-            expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=refresh-token/);
-            expect(authService.register).toHaveBeenCalledWith({
-                email: 'user@example.com',
-                password: 'Password123',
-                metadata: { name: 'Tester' },
+            expect(res.headers['set-cookie']).toEqual(
+                expect.arrayContaining([
+                    expect.stringMatching(/sb-access-token=;/),
+                    expect.stringMatching(/sb-refresh-token=refresh-token/),
+                ])
+            );
+            expect(authService.consumeGoogleSession).toHaveBeenCalledWith({
+                accessToken: 'access-token',
+                refreshToken: 'refresh-token',
+                expiresIn: 3600,
+                tokenType: 'bearer',
             });
+        });
+
+        it('returns 200 when existing user signs in', async () => {
+            authService.consumeGoogleSession.mockResolvedValue({
+                user: { id: 'user-456' },
+                session: payload,
+                profileComplete: true,
+                isNewUser: false,
+            });
+
+            const res = await request(app).post('/api/auth/google/session').send(payload);
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('Authenticated with Google');
         });
 
         it('returns 422 when payload invalid', async () => {
-            const res = await request(app).post('/api/auth/register').send({});
+            const res = await request(app).post('/api/auth/google/session').send({});
 
             expect(res.status).toBe(422);
             expect(res.body.success).toBe(false);
-            expect(res.body.message).toBeDefined();
-        });
-    });
-
-    describe('POST /api/auth/login', () => {
-        it('returns 200 with tokens and sets cookie', async () => {
-            authService.login.mockResolvedValue({
-                user: { id: 'user-123' },
-                session: {
-                    refresh_token: 'refresh-token',
-                    access_token: 'access-token',
-                    expires_in: 3600,
-                    token_type: 'bearer',
-                },
-                profileComplete: true,
-            });
-
-            const res = await request(app)
-                .post('/api/auth/login')
-                .send({ email: 'user@example.com', password: 'Password123' });
-
-            expect(res.status).toBe(200);
-            expect(res.body.message).toBe('Logged in');
-            expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=refresh-token/);
-            expect(authService.login).toHaveBeenCalledWith({
-                email: 'user@example.com',
-                password: 'Password123',
-            });
+            expect(authService.consumeGoogleSession).not.toHaveBeenCalled();
         });
     });
 
@@ -107,125 +105,137 @@ describe('Auth Routes', () => {
         it('clears cookie and returns success', async () => {
             authService.logout.mockResolvedValue();
 
-            const res = await request(app)
-                .post('/api/auth/logout')
-                .set('Cookie', ['refresh_token=refresh-token'])
-                .send({});
+            const res = await request(app).post('/api/auth/logout').send({});
 
             expect(res.status).toBe(200);
             expect(res.body.message).toBe('Logged out');
-            expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=;/);
-            expect(res.headers['set-cookie'][0]).toMatch(/Max-Age=0/);
-            expect(authService.logout).toHaveBeenCalledWith('refresh-token');
-        });
-
-        it('returns 401 when refresh cookie missing', async () => {
-            const res = await request(app).post('/api/auth/logout').send({});
-
-            expect(res.status).toBe(401);
-            expect(res.body.success).toBe(false);
-            expect(res.body.message).toBe('Refresh token missing');
-            expect(authService.logout).not.toHaveBeenCalled();
-        });
-    });
-
-    describe('POST /api/auth/refresh', () => {
-        it('refreshes session, sets cookie, and returns payload', async () => {
-            authService.refreshSession.mockResolvedValue({
-                user: { id: 'user-123' },
-                session: {
-                    refresh_token: 'refresh-token-2',
-                    access_token: 'access-token-2',
-                    expires_in: 3600,
-                    token_type: 'bearer',
-                },
-                profileComplete: true,
-            });
-
-            const res = await request(app)
-                .post('/api/auth/refresh')
-                .set('Cookie', ['refresh_token=refresh-token'])
-                .send({});
-
-            expect(res.status).toBe(200);
-            expect(res.body.message).toBe('Session refreshed');
-            expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=refresh-token-2/);
-            expect(authService.refreshSession).toHaveBeenCalledWith('refresh-token');
-        });
-
-        it('returns 401 when cookie missing', async () => {
-            const res = await request(app).post('/api/auth/refresh').send({});
-
-            expect(res.status).toBe(401);
-            expect(res.body.success).toBe(false);
-            expect(res.body.message).toBe('Refresh token missing');
-            expect(authService.refreshSession).not.toHaveBeenCalled();
-        });
-    });
-    describe('PATCH /api/auth/profile', () => {
-        const validPayload = {
-            name: 'Test User',
-            gender: 'male',
-            dob: '1990-01-01',
-            heightFeet: 5,
-            heightInches: 8,
-            religion: 'hindu',
-            caste: 'brahmin',
-            rashi: 'aries',
-        };
-
-        it('updates profile and returns status', async () => {
-            authService.updateProfile.mockResolvedValue({
-                user: { id: 'user-123', name: 'Test User' },
-                profileComplete: true,
-            });
-            const res = await request(app).patch('/api/auth/profile').send(validPayload);
-
-            expect(res.status).toBe(200);
-            expect(res.body).toEqual({
-                success: true,
-                message: 'Profile updated',
-                data: {
-                    user: { id: 'user-123', name: 'Test User' },
-                    profileComplete: true,
-                },
-            });
-            expect(authService.updateProfile).toHaveBeenCalledWith(
-                {
-                    id: 'user-123',
-                    email: 'user@example.com',
-                    user_metadata: {},
-                },
+            expect(res.headers['set-cookie']).toEqual(
+                expect.arrayContaining([
+                    expect.stringMatching(/sb-access-token=;/),
+                    expect.stringMatching(/sb-refresh-token=;/),
+                ])
+            );
+            expect(authService.logout).toHaveBeenCalledWith(
                 expect.objectContaining({
-                    name: 'Test User',
-                    gender: 'male',
-                    dob: expect.any(Date),
-                    heightFeet: 5,
-                    heightInches: 8,
-                    religion: 'hindu',
-                    caste: 'brahmin',
-                    rashi: 'aries',
+                    id: 'user-123',
                 })
             );
         });
 
-        it('returns 422 when payload invalid', async () => {
-            const res = await request(app).patch('/api/auth/profile').send({});
-
-            expect(res.status).toBe(422);
-            expect(authService.updateProfile).not.toHaveBeenCalled();
-        });
-
-        it('propagates auth failures', async () => {
-
+        it('propagates auth errors before logout handler', async () => {
             const error = new ApiError(httpStatus.UNAUTHORIZED, 'Unauthorized');
 
             authenticate.mockImplementationOnce((_req, _res, next) => next(error));
-            const res = await request(app).patch('/api/auth/profile').send(validPayload);
+
+            const res = await request(app).post('/api/auth/logout').send({});
 
             expect(res.status).toBe(401);
             expect(res.body.success).toBe(false);
-            expect(authService.updateProfile).not.toHaveBeenCalled();
+            expect(authService.logout).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('GET /api/auth/me', () => {
+        it('returns authenticated profile payload', async () => {
+            authService.getProfile.mockResolvedValue({
+                user: { id: 'user-123', fullName: 'Test User' },
+                profileComplete: true,
+            });
+
+            const res = await request(app).get('/api/auth/me');
+
+            expect(res.status).toBe(200);
+            expect(res.body).toEqual({
+                success: true,
+                message: 'Profile retrieved',
+                data: {
+                    user: { id: 'user-123', fullName: 'Test User' },
+                    profileComplete: true,
+                },
+            });
+            expect(authService.getProfile).toHaveBeenCalledWith(
+                expect.objectContaining({ id: 'user-123' })
+            );
+        });
+
+        it('propagates upstream errors', async () => {
+            const error = new ApiError(httpStatus.NOT_FOUND, 'Not found');
+
+            authService.getProfile.mockRejectedValue(error);
+
+            const res = await request(app).get('/api/auth/me');
+
+            expect(res.status).toBe(404);
+            expect(res.body.success).toBe(false);
+            expect(res.body.message).toBe('Not found');
+        });
+    });
+
+    describe('POST /api/auth/google/session/refresh', () => {
+        it('refreshes session and sets cookies', async () => {
+            authService.refreshSession.mockResolvedValue({
+                user: { id: 'user-123' },
+                session: {
+                    accessToken: 'new-access',
+                    refreshToken: 'new-refresh',
+                    expiresIn: 1800,
+                    refreshExpiresIn: 2592000,
+                    tokenType: 'bearer',
+                },
+                profileComplete: true,
+                isNewUser: false,
+            });
+
+            const res = await request(app)
+                .post('/api/auth/google/session/refresh')
+                .send({ refreshToken: 'refresh-token' });
+
+            expect(res.status).toBe(200);
+            expect(res.body).toEqual({
+                success: true,
+                message: 'Session refreshed',
+                data: {
+                    user: { id: 'user-123' },
+                    session: {
+                        accessToken: 'new-access',
+                        expiresIn: 1800,
+                        refreshExpiresIn: 2592000,
+                        tokenType: 'bearer',
+                    },
+                    profileComplete: true,
+                    isNewUser: false,
+                },
+            });
+            expect(res.headers['set-cookie']).toEqual(
+                expect.arrayContaining([
+                    expect.stringMatching(/sb-access-token=;/),
+                    expect.stringMatching(/sb-refresh-token=new-refresh/),
+                ])
+            );
+            expect(authService.refreshSession).toHaveBeenCalledWith({ refreshToken: 'refresh-token' });
+        });
+
+        it('allows using refresh token from cookie', async () => {
+            authService.refreshSession.mockResolvedValue({
+                user: { id: 'user-123' },
+                session: {
+                    accessToken: 'cookie-access',
+                    refreshToken: 'cookie-refresh',
+                    expiresIn: 1800,
+                    refreshExpiresIn: 2592000,
+                    tokenType: 'bearer',
+                },
+                profileComplete: false,
+                isNewUser: false,
+            });
+
+            const res = await request(app)
+                .post('/api/auth/google/session/refresh')
+                .set('Cookie', ['sb-refresh-token=existing-refresh'])
+                .send({});
+
+            expect(authService.refreshSession).toHaveBeenCalledWith({ refreshToken: 'existing-refresh' });
+            expect(res.status).toBe(200);
         });
     });
 });
