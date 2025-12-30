@@ -9,7 +9,7 @@ const googleSessionSchema = Joi.object({
 }).required();
 
 const refreshSessionSchema = Joi.object({
-    refreshToken: Joi.string().trim(),
+    refreshToken: Joi.string().trim().required(),
 }).unknown(false);
 
 const validateRefreshSession = (req, _res, next) => {

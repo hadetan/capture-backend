@@ -74,7 +74,13 @@ const refreshSession = catchAsync(async (req, res) => {
 });
 
 const logout = catchAsync(async (req, res) => {
-    await authService.logout(req.authUser);
+    const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+
+    await authService.logout({
+        authUser: req.authUser,
+        accessToken: req.accessToken,
+        refreshToken,
+    });
     clearAccessCookie(res);
     clearRefreshCookie(res);
     httpResponse.success(res, null, 'Logged out');

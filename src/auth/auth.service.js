@@ -308,13 +308,21 @@ const refreshSession = async ({ refreshToken }) => {
     };
 };
 
-const logout = async (authUser) => {
+const logout = async ({ authUser, accessToken, refreshToken }) => {
     if (!authUser?.id) {
         throw new ApiError(httpStatus.UNAUTHORIZED, 'User context missing');
     }
 
+    const token = [accessToken, refreshToken]
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .find((value) => Boolean(value));
+
+    if (!token) {
+        throw new ApiError(httpStatus.UNAUTHORIZED, 'Session token missing');
+    }
+
     const client = getSupabaseClient();
-    const { error } = await client.auth.admin.signOut(authUser.id);
+    const { error } = await client.auth.admin.signOut(token);
 
     if (error) {
         throw toApiError(error, httpStatus.BAD_REQUEST);
