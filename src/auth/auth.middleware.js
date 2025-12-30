@@ -1,9 +1,7 @@
 const { ApiError, consts } = require('../utils');
 const { getSupabaseClient } = require('../config/supabase');
 
-const { httpStatus } = consts;
-
-const ACCESS_COOKIE_NAME = 'sb-access-token';
+const { httpStatus, ACCESS_COOKIE_NAME } = consts;
 
 const extractBearerToken = (authorizationHeader = '') => {
     if (typeof authorizationHeader !== 'string') {
